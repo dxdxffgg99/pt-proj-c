@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+          - name: linux-clang
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+
+          - name: macos-appleclang
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+
+          - name: windows-gnu
+            os: windows-latest
+            msys2: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2 base (Windows only)
+        if: matrix.msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: false
+          update: false
+
+      - name: Patch pacman to retry on flaky mirrors (Windows only)
+        if: matrix.msys2
+        shell: msys2 {0}
+        run: |
+          sed -i '/^\[options\]/a XferCommand = /usr/bin/curl --retry 5 --retry-delay 3 --connect-timeout 10 -L -C - -f -o %o %u' /etc/pacman.conf
+          grep -A1 '^\[options\]' /etc/pacman.conf
+
+      - name: Install mingw-w64 toolchain (Windows only)
+        if: matrix.msys2
+        shell: msys2 {0}
+        run: |
+          for i in 1 2 3 4 5; do
+            pacman -Sy --noconfirm && break
+            echo "pacman -Sy attempt $i failed, retrying..."
+            sleep 10
+          done
+          pacman -S --needed --noconfirm \
+            mingw-w64-x86_64-gcc \
+            mingw-w64-x86_64-cmake \
+            mingw-w64-x86_64-ninja
+
+      - name: Verify toolchain installed (Windows only)
+        if: matrix.msys2
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          command -v gcc || { echo "::error::gcc not found after install"; exit 1; }
+          command -v cmake || { echo "::error::cmake not found after install"; exit 1; }
+          command -v ninja || { echo "::error::ninja not found after install"; exit 1; }
+          gcc --version
+          cmake --version
+
+      - name: Configure & Build (Windows/MSYS2)
+        if: matrix.msys2
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Verify compiler ID (Windows/MSYS2)
+        if: matrix.msys2
+        shell: msys2 {0}
+        run: |
+          grep -q "GNU" build/CMakeCache.txt && echo "OK: GNU"
+
+      - name: Configure & Build (Linux/macOS)
+        if: matrix.msys2 != true
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
